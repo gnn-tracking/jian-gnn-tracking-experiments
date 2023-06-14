@@ -55,11 +55,18 @@ class MHGravNetConv(MessagePassing):
         self.k = k
         self.num_heads = num_heads
 
+        self.layernorm1 = torch.nn.LayerNorm(out_channels)
+        self.layernorm2 = torch.nn.LayerNorm(out_channels)
+        self.layernorm3 = torch.nn.LayerNorm(out_channels)
+
         self.lin_embed = Linear(in_channels, num_heads * space_dimensions)
         self.lin_features = Linear(in_channels, num_heads * propagate_dimensions)
 
         self.lin_out1 = Linear(in_channels, out_channels, bias=False)
         self.lin_out2 = Linear(2 * num_heads * propagate_dimensions, out_channels)
+
+        self.act = torch.nn.LeakyReLU()
+        self.dropout = torch.nn.Dropout(0.2)
 
         self.reset_parameters()
 
@@ -72,7 +79,7 @@ class MHGravNetConv(MessagePassing):
         self.lin_out2.reset_parameters()
 
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, drop=False) -> Tensor:
         # type: (Tensor, OptTensor) -> Tensor  # noqa
         # type: (PairTensor, Optional[PairTensor]) -> Tensor  # noqa
 
@@ -88,7 +95,10 @@ class MHGravNetConv(MessagePassing):
         # propagate_type: (x: OptPairTensor, edge_weight: OptTensor)
         out = self.propagate(edge_index, x=(h_l, None), edge_weight=edge_weight, size=(s_l.size(0), s_l.size(0))).view(x.size()[0], -1)
 
-        return self.lin_out1(x) + self.lin_out2(out)
+        if drop:
+            out = self.dropout(out)
+
+        return self.layernorm2(self.lin_out1(x) + self.lin_out2(out))
 
     def message(self, x_j: Tensor, edge_weight: Tensor) -> Tensor:
         return x_j * edge_weight.unsqueeze(1)
