@@ -1,6 +1,3 @@
-import warnings
-from typing import Optional, Union
-
 import torch
 from torch import Tensor
 
@@ -11,40 +8,6 @@ from torch_geometric.typing import OptTensor, PairOptTensor, PairTensor
 from torch_cluster import knn
 
 class MHGravNetConv(MessagePassing):
-    r"""The GravNet operator from the `"Learning Representations of Irregular
-    Particle-detector Geometry with Distance-weighted Graph
-    Networks" <https://arxiv.org/abs/1902.07987>`_ paper, where the graph is
-    dynamically constructed using nearest neighbors.
-    The neighbors are constructed in a learnable low-dimensional projection of
-    the feature space.
-    A second projection of the input feature space is then propagated from the
-    neighbors to each vertex using distance weights that are derived by
-    applying a Gaussian function to the distances.
-
-    Args:
-        in_channels (int): Size of each input sample, or :obj:`-1` to derive
-            the size from the first input(s) to the forward method.
-        out_channels (int): The number of output channels.
-        space_dimensions (int): The dimensionality of the space used to
-           construct the neighbors; referred to as :math:`S` in the paper.
-        propagate_dimensions (int): The number of features to be propagated
-           between the vertices; referred to as :math:`F_{\textrm{LR}}` in the
-           paper.
-        k (int): The number of nearest neighbors.
-        **kwargs (optional): Additional arguments of
-            :class:`torch_geometric.nn.conv.MessagePassing`.
-
-    Shapes:
-        - **input:**
-          node features :math:`(|\mathcal{V}|, F_{in})` or
-          :math:`((|\mathcal{V_s}|, F_{in}), (|\mathcal{V_t}|, F_{in}))`
-          if bipartite,
-          batch vector :math:`(|\mathcal{V}|)` or
-          :math:`((|\mathcal{V}_s|), (|\mathcal{V}_t|))` if bipartite
-          *(optional)*
-        - **output:** node features :math:`(|\mathcal{V}|, F_{out})` or
-          :math:`(|\mathcal{V}_t|, F_{out})` if bipartite
-    """
     def __init__(self, in_channels: int, out_channels: int, space_dimensions: int, propagate_dimensions: int, k: int, num_heads: int, **kwargs):
         super().__init__(aggr=['mean', 'max'], flow='source_to_target', **kwargs)
 
@@ -64,6 +27,9 @@ class MHGravNetConv(MessagePassing):
 
         self.lin_out1 = Linear(in_channels, out_channels, bias=False)
         self.lin_out2 = Linear(2 * num_heads * propagate_dimensions, out_channels)
+
+        self.lin_mes1 = Linear(2 * propagate_dimensions, 3 * propagate_dimensions)
+        self.lin_mes2 = Linear(3 * propagate_dimensions, propagate_dimensions)
 
         self.act = torch.nn.LeakyReLU()
         self.dropout = torch.nn.Dropout(0.2)
@@ -93,15 +59,16 @@ class MHGravNetConv(MessagePassing):
         edge_weight = torch.exp(-10. * edge_weight)  # 10 gives a better spread
 
         # propagate_type: (x: OptPairTensor, edge_weight: OptTensor)
-        out = self.propagate(edge_index, x=(h_l, None), edge_weight=edge_weight, size=(s_l.size(0), s_l.size(0))).view(x.size()[0], -1)
+        out = self.propagate(edge_index, x=(h_l, h_l), edge_weight=edge_weight, size=(s_l.size(0), s_l.size(0))).view(x.size()[0], -1)
 
         if drop:
             out = self.dropout(out)
 
         return self.layernorm2(self.lin_out1(x) + self.lin_out2(out))
 
-    def message(self, x_j: Tensor, edge_weight: Tensor) -> Tensor:
-        return x_j * edge_weight.unsqueeze(1)
+    def message(self, x_j: Tensor, x_i: Tensor, edge_weight: Tensor) -> Tensor:
+        mes = self.lin_mes2(self.act(self.lin_mes1(torch.cat([x_i, x_j], dim=-1))))
+        return (mes/torch.linalg.vector_norm(mes, dim=-1).unsqueeze(-1)) * edge_weight.unsqueeze(1)
 
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.in_channels}, '
